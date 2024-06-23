@@ -1,119 +1,91 @@
-import json
-import logging
-from urllib.parse import urlencode
 import requests
+import logging
+from requests.adapters import HTTPAdapter
+from requests.exceptions import RequestException, HTTPError, ConnectionError, Timeout
+from urllib3.util import Retry
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from pnacos import NACOS_URL
 
-NACOS_URL = {
-    "CONFIG": "/nacos/v2/cs/config",
-}
+
+class HttpClient:
+    def __init__(self, max_retries=3, backoff_factor=0.3, timeout=10, pool_maxsize=10):
+        """
+        初始化HTTP客户端
+
+        :param max_retries: 最大重试次数
+        :param backoff_factor: 重试间隔时间因子
+        :param timeout: 请求超时时间（秒）
+        :param pool_maxsize: 连接池的最大连接数
+        """
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
+        self.timeout = timeout
+
+        # 初始化Session和连接池
+        self.session = requests.Session()
+        retries = Retry(
+            total=max_retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=[500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retries, pool_maxsize=pool_maxsize)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
+    def request(self, method, url, **kwargs):
+        """
+        发送HTTP请求，失败时重试
+
+        :param method: 请求方法（GET, POST, DELETE等）
+        :param url: 请求的URL
+        :param kwargs: 其他参数，如headers, params, data, json等
+        :return: 响应对象
+        """
+        method = method.upper()
+        if method not in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']:
+            raise ValueError("Unsupported HTTP method")
+        try:
+            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            response.raise_for_status()  # 如果响应状态码不是200，抛出HTTPError
+        except (HTTPError, ConnectionError, Timeout) as e:
+            logging.error(f"Request failed: {e}. No more retries left.")
+        except RequestException as e:
+            logging.error(f"Request failed with an unexpected error: {e}")
+        return response
+
+
+# 客户端初始化
+client = HttpClient()
 
 
 class NacosClient:
-    def __init__(self, server_addresses, namespace_id=None, username=None, password=None, proxies=None):
-        self.server_list = self._parse_server_addresses(server_addresses)
-        self.current_server = self.server_list[0]
-        self.namespace_id = namespace_id
+    def __init__(self, server_addresses, username=None, password=None):
+        """
+
+        :param server_addresses: 172.26.22.201:30002
+        :param namespace_id:
+        :param username:
+        :param password:
+        """
+        self.server_addresses = server_addresses
         self.username = username
         self.password = password
-        self.proxies = proxies
-
-    def parse_nacos_server_addr(self, server_addr):
-        """
-        解析Nacos地址
-        :param server_addr:
-        :return:
-        """
-        sp = server_addr.split(":")
-        port = int(sp[1]) if len(sp) > 1 else 8848
-        return sp[0], port
-
-    def _parse_server_addresses(self, server_addresses):
-        """
-        解析多个Nacos服务地址
-        :param server_addresses:
-        :return:
-        """
-        server_list = []
-        for server_addr in server_addresses.split(","):
-            try:
-                server_list.append(self.parse_nacos_server_addr(server_addr.strip()))
-            except Exception as e:
-                logger.exception(f"[init] Invalid server address: {server_addr}")
-                raise ValueError(f"Invalid server address: {server_addr}") from e
-        return server_list
-
-    def get_server(self):
-        """
-        获取当前Nacos服务器
-        :return:
-        """
-        logger.info(f"[get-server] Using server: {self.current_server}")
-        return self.current_server
-
-    @staticmethod
-    def _get_common_headers():
-        return {}
-
-    def _request(self, path, headers, params, data=None, method="GET", timeout=None):
+        self.client = client
         if self.username and self.password:
-            params = params or {}
-            params.update({"username": self.username, "password": self.password})
+            self.token = self.login()
+            # self.token = client.request('POST', 'http://'+self.server_addresses+NACOS_URL.get("LOGIN"), json={'username': self.username, 'password': self.password})
 
-        url = f"{path}?{urlencode(params)}"
-        all_headers = self._get_common_headers()
-        if headers:
-            all_headers.update(headers)
+    def login(self) -> str:
+        url = 'http://' + self.server_addresses + NACOS_URL.get("LOGIN")
+        response = self.client.request('POST', url, data={"username": self.username, "password": self.password})
+        if response.status_code != 200:
+            raise ConnectionError(f"Login failed: {response.text}")
+        return response.json()['accessToken']
 
-        for tries in range(3):  # 尝试三次
-            try:
-                address, port = self.get_server()
-                server_url = f"http://{address}:{port}"
-                response = requests.request(
-                    url=server_url + url,
-                    data=urlencode(data).encode() if data else None,
-                    headers=all_headers,
-                    method=method,
-                    timeout=timeout,
-                    proxies=self.proxies
-                )
-                response.raise_for_status()  # 检查HTTP错误
-                return response
-            except requests.RequestException as e:
-                logger.error(f"[_request] Try {tries + 1} failed: {e}")
-                if tries == 2:  # 最后一次尝试失败后抛出异常
-                    raise
-
-    def get_config(self, data_id, group):
-        params = {
-            "dataId": data_id,
-            "group": group,
-            "namespaceId": self.namespace_id
-        }
-        resp = self._request(NACOS_URL["CONFIG"], None, params)
-        try:
-            data = resp.json().get("data", {})
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON response: {e}")
-            data = '{}'
-        return data
-
-
-if __name__ == "__main__":
-    SERVER_ADDRESSES = "172.26.22.201:30002"
-    NAMESPACE = "90910445-f94b-4581-bb29-4ee46c9f356f"
-    USERNAME = "nacos"
-    PASSWORD = "nacos123456"
-
-    client = NacosClient(SERVER_ADDRESSES, namespace_id=NAMESPACE, username=USERNAME, password=PASSWORD)
-
-    data_id = "user-web"
-    group = "dev"
-    try:
-        content = client.get_config(data_id, group)
-        print("获取的配置内容: ", content)
-    except Exception as e:
-        logger.error(f"Failed to get config: {e}")
+    def request(self, method, url, **kwargs):
+        if hasattr(self, 'token'):
+            if "?" in url:
+                url += "&accessToken=" + self.token
+            else:
+                url += "?accessToken=" + self.token
+        return self.client.request(method, url, **kwargs)
