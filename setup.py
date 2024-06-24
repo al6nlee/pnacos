@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pnacos",
-    version="0.1.1",
+    version="0.1.2",
     author="alan",
     author_email="al6nlee@gmail.com",
     description="适配nacos模块",
