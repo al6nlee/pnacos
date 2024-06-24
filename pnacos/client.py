@@ -71,12 +71,12 @@ class NacosClient:
         self.username = username
         self.password = password
         self.client = client
+        self.baseurl = 'http://' + self.server_addresses
         if self.username and self.password:
             self.token = self.login()
-            # self.token = client.request('POST', 'http://'+self.server_addresses+NACOS_URL.get("LOGIN"), json={'username': self.username, 'password': self.password})
 
     def login(self) -> str:
-        url = 'http://' + self.server_addresses + NACOS_URL.get("LOGIN")
+        url = self.baseurl + NACOS_URL.get("LOGIN")
         response = self.client.request('POST', url, data={"username": self.username, "password": self.password})
         if response.status_code != 200:
             raise ConnectionError(f"Login failed: {response.text}")
